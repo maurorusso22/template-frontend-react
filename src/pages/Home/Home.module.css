@@ -1,0 +1,12 @@
+.home {
+  max-width: 640px;
+}
+
+.home h1 {
+  margin-bottom: 1rem;
+}
+
+.home p {
+  line-height: 1.6;
+  color: #555;
+}

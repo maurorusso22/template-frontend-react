@@ -121,7 +121,7 @@ jobs:
 
       - name: Upload Hadolint SARIF to GitHub Security
         if: ${{ !cancelled() && !env.ACT && hashFiles('hadolint-results.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: hadolint-results.sarif
           category: hadolint
@@ -138,7 +138,7 @@ jobs:
 
       - name: Upload Trivy config SARIF to GitHub Security
         if: ${{ !cancelled() && !env.ACT && hashFiles('trivy-config-results.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-config-results.sarif
           category: trivy-config
@@ -193,7 +193,7 @@ jobs:
 
       - name: Upload Trivy image SARIF to GitHub Security
         if: ${{ !cancelled() && !env.ACT && hashFiles('trivy-image-results.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-image-results.sarif
           category: trivy-image

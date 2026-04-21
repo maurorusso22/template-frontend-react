@@ -1,0 +1,337 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".github/CODEOWNERS"
+      - ".github/pull_request_template.md"
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".github/CODEOWNERS"
+      - ".github/pull_request_template.md"
+
+# Workflow-level env vars — change these per project.
+env:
+  NODE_VERSION: "22"
+  APP_NAME: template-frontend-react           # TODO: change to your application name
+  DOCKER_IMAGE_NAME: template-frontend-react  # TODO: change to your Docker image name
+
+# Least-privilege defaults; jobs override what they need (e.g. security-events: write).
+permissions:
+  contents: read
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Job 1: quality — format, lint, type-check, test with coverage.
+  # Fail-fast cascade: each step is gated on the previous step's success so
+  # the pipeline stops at the first failure instead of running every check and
+  # producing noisy output.
+  # ----------------------------------------------------------------------------
+  quality:
+    name: Code Quality & Testing
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        id: install
+        run: pnpm install --frozen-lockfile
+
+      - name: Format check (Biome)
+        id: format-check
+        if: steps.install.outcome == 'success'
+        run: pnpm biome format .
+
+      - name: Lint + import sorting (Biome)
+        id: lint
+        if: steps.format-check.outcome == 'success'
+        run: pnpm biome lint .
+
+      - name: Type check (tsc)
+        id: typecheck
+        if: steps.lint.outcome == 'success'
+        run: pnpm tsc --noEmit
+
+      - name: Tests with coverage
+        id: tests
+        if: steps.typecheck.outcome == 'success'
+        run: pnpm vitest run --coverage
+
+      # Skipped under act (no GitHub artifact storage locally).
+      - name: Upload coverage artifact
+        if: always() && !env.ACT
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/lcov.info
+          if-no-files-found: ignore
+
+  # ----------------------------------------------------------------------------
+  # Job 2: dockerfile-security — static analysis of the Dockerfile and repo
+  # configs. Fully local-compatible (reads files only, no Docker daemon, no
+  # network). Only the SARIF uploads are skipped under act.
+  # ----------------------------------------------------------------------------
+  dockerfile-security:
+    name: Dockerfile Static Analysis
+    runs-on: ubuntu-latest
+    needs: quality
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Direct CLI invocation instead of hadolint/hadolint-action (a Docker-based
+      # action) — Docker-based actions fail under act due to a local image pull bug.
+      # CLI approach is consistent with how we run Trivy image scan in Job 3.
+      - name: Install Hadolint
+        run: |
+          HADOLINT_VERSION=v2.12.0
+          curl -sL "https://github.com/hadolint/hadolint/releases/download/${HADOLINT_VERSION}/hadolint-Linux-x86_64" -o /usr/local/bin/hadolint
+          chmod +x /usr/local/bin/hadolint
+          hadolint --version
+
+      - name: Hadolint (Dockerfile lint)
+        id: hadolint
+        run: |
+          hadolint Dockerfile --format sarif > hadolint-results.sarif || HADOLINT_EXIT=$?
+          # Display human-readable output for CI logs
+          hadolint Dockerfile --failure-threshold error || true
+          # Fail only on error-level findings (style/info/warning surface in SARIF but don't block)
+          exit ${HADOLINT_EXIT:-0}
+
+      - name: Upload Hadolint SARIF to GitHub Security
+        if: ${{ !cancelled() && !env.ACT && hashFiles('hadolint-results.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: hadolint-results.sarif
+          category: hadolint
+
+      - name: Trivy config scan (Dockerfile + YAML misconfig)
+        id: trivy-config
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          format: sarif
+          output: trivy-config-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+
+      - name: Upload Trivy config SARIF to GitHub Security
+        if: ${{ !cancelled() && !env.ACT && hashFiles('trivy-config-results.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-config-results.sarif
+          category: trivy-config
+
+  # ----------------------------------------------------------------------------
+  # Job 3: build — build the Docker image, scan it with Trivy, smoke-test it.
+  # Runs locally under act too (no registry needed). Only GHA cache and SARIF
+  # upload are skipped locally.
+  # ----------------------------------------------------------------------------
+  build:
+    name: Docker Build & Image Security
+    runs-on: ubuntu-latest
+    needs: [quality, dockerfile-security]
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+          cache-from: ${{ !env.ACT && 'type=gha' || '' }}
+          cache-to: ${{ !env.ACT && 'type=gha,mode=max' || '' }}
+
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.6
+        with:
+          version: v0.69.3
+
+      - name: Trivy image scan (CVEs in built image)
+        id: trivy-image
+        env:
+          IMAGE_REF: ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+        run: |
+          trivy image \
+            --format sarif \
+            --output trivy-image-results.sarif \
+            --severity CRITICAL,HIGH \
+            --ignore-unfixed \
+            --ignorefile .trivyignore \
+            --exit-code 1 \
+            "$IMAGE_REF"
+
+      - name: Upload Trivy image SARIF to GitHub Security
+        if: ${{ !cancelled() && !env.ACT && hashFiles('trivy-image-results.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image-results.sarif
+          category: trivy-image
+
+      - name: Container smoke test
+        run: |
+          set -e
+          IMAGE="${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}"
+          docker run -d --name smoke-test -p 8080:8080 "$IMAGE"
+
+          # Wait for readiness (up to 30s)
+          ready=0
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/health -o /tmp/health.json; then
+              ready=1
+              break
+            fi
+            echo "Waiting for container... ($i/30)"
+            sleep 1
+          done
+
+          echo "=== Container logs ==="
+          docker logs smoke-test || true
+
+          if [ "$ready" -ne 1 ]; then
+            echo "Container did not become ready in time"
+            docker stop smoke-test >/dev/null 2>&1 || true
+            docker rm smoke-test >/dev/null 2>&1 || true
+            exit 1
+          fi
+
+          echo "=== /health response ==="
+          cat /tmp/health.json
+          echo ""
+
+          # Verify health JSON — tolerate optional whitespace
+          grep -Eq '"status"[[:space:]]*:[[:space:]]*"healthy"' /tmp/health.json
+
+          # Verify index.html is served at /
+          echo "=== GET / ==="
+          curl -sf http://localhost:8080/ -o /tmp/index.html
+          grep -q '<div id="root">' /tmp/index.html
+          echo "Root div found in index.html"
+
+          # Verify SPA fallback — /items should return index.html, not 404
+          echo "=== GET /items (SPA fallback) ==="
+          curl -sf http://localhost:8080/items -o /tmp/items.html
+          grep -q '<div id="root">' /tmp/items.html
+          echo "SPA fallback working — /items returns index.html"
+
+          docker stop smoke-test
+          docker rm smoke-test
+
+      - name: Save Docker image to tar
+        if: github.ref == 'refs/heads/main' && !env.ACT
+        run: docker save "${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}" -o /tmp/image.tar
+
+      - name: Upload Docker image artifact
+        if: github.ref == 'refs/heads/main' && !env.ACT
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp/image.tar
+          compression-level: 0
+          retention-days: 1
+
+      - name: Cleanup built image (act only)
+        if: always() && env.ACT
+        run: docker rmi "${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}" || true
+
+  # ----------------------------------------------------------------------------
+  # Job 4: push — push to registry. Only on push to main, only on GitHub
+  # (never under act). Registry-agnostic: works with Docker Hub, ghcr.io,
+  # ECR, ACR, Harbor, Nexus, Artifactory — configured via secrets/variables.
+  # ----------------------------------------------------------------------------
+  push:
+    name: Push to Registry
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Verify registry credentials are configured
+        if: ${{ !env.ACT }}
+        run: |
+          echo "REGISTRY_USERNAME configured: ${{ secrets.REGISTRY_USERNAME != '' }}"
+          echo "REGISTRY_TOKEN configured:    ${{ secrets.REGISTRY_TOKEN != '' }}"
+          echo "REGISTRY_URL (variable):      ${{ vars.REGISTRY_URL || '(empty → Docker Hub default)' }}"
+          if [ -z "${{ secrets.REGISTRY_USERNAME }}" ] || [ -z "${{ secrets.REGISTRY_TOKEN }}" ]; then
+            echo "::error::Registry credentials are missing. Configure REGISTRY_USERNAME and REGISTRY_TOKEN repository secrets."
+            exit 1
+          fi
+
+      - name: Download Docker image artifact
+        if: ${{ !env.ACT }}
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+          path: /tmp
+
+      - name: Load Docker image
+        if: ${{ !env.ACT }}
+        run: docker load -i /tmp/image.tar
+
+      - name: Log in to registry
+        if: ${{ !env.ACT }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.REGISTRY_URL }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      - name: Tag and push
+        id: push
+        if: ${{ !env.ACT }}
+        env:
+          SOURCE_REF: ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}
+          TARGET_REF: ${{ vars.REGISTRY_URL != '' && format('{0}/{1}:{2}', vars.REGISTRY_URL, env.DOCKER_IMAGE_NAME, github.sha) || format('{0}:{1}', env.DOCKER_IMAGE_NAME, github.sha) }}
+        run: |
+          set -e
+          docker tag "$SOURCE_REF" "$TARGET_REF"
+          docker push "$TARGET_REF"
+          echo "target_ref=$TARGET_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Registry push summary
+        if: ${{ success() && !env.ACT }}
+        env:
+          TARGET_REF: ${{ steps.push.outputs.target_ref }}
+        run: |
+          {
+            echo "### Registry push"
+            echo ""
+            echo "| Field    | Value |"
+            echo "| -------- | ----- |"
+            echo "| Image    | \`$TARGET_REF\` |"
+            echo "| Commit   | \`${{ github.sha }}\` |"
+            echo "| Registry | \`${{ vars.REGISTRY_URL || 'docker.io (default)' }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Pushed $TARGET_REF"

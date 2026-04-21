@@ -1,0 +1,12 @@
+# Trivy CVE allow-list — time-boxed exceptions for findings with no upstream fix.
+#
+# Format:  CVE-YYYY-NNNNN   # reason (exp:YYYY-MM-DD)
+#
+# Rules:
+#   - Only add CVEs that have no fix available in the base image.
+#   - Always include an expiry date (exp:YYYY-MM-DD) — revisit when it passes.
+#   - Remove the entry as soon as Dependabot opens a base-image bump PR that
+#     includes the fix.
+#
+# Example:
+#   CVE-2024-99999   # nginx: no fix in stable-alpine yet (exp:2025-06-01)

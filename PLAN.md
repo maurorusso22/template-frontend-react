@@ -740,13 +740,13 @@ act -j build --secret-file .secrets --container-architecture linux/amd64 --pull=
 
 **Pre-requisite:** The pipeline has been verified locally with `act` (Step 6). This step covers GitHub-specific setup only.
 
-#### 5a. Enable GitHub Actions
+#### 7a. Enable GitHub Actions
 
 Repo → **Settings → Actions → General**:
 - "Allow all actions and reusable workflows" (or allow the specific actions used in `ci.yml`).
 - Workflow permissions → **Read and write permissions**. The per-job `permissions:` blocks in `ci.yml` narrow this to least-privilege, but the workflow-level setting must be permissive enough to allow `security-events: write` (SARIF uploads) and `packages: write` (GHCR push).
 
-#### 5b. Configure GHCR secrets and variables
+#### 7b. Configure GHCR secrets and variables
 
 The `push` job needs registry credentials. These must be in place before the first merge to `main` (the `push` job only runs on `main`).
 
@@ -761,7 +761,7 @@ The `push` job needs registry credentials. These must be in place before the fir
 
 The resulting image target will be `ghcr.io/<username>/<DOCKER_IMAGE_NAME>:<commit-sha>`.
 
-#### 5c. Push branch and open a PR to main
+#### 7c. Push branch and open a PR to main
 
 ```bash
 git push -u origin <your-branch>
@@ -777,7 +777,7 @@ gh pr checks --watch
 
 Expected: `quality`, `dockerfile-security`, `build` green; `push` skipped.
 
-#### 5d. Merge to main and verify the push job
+#### 7d. Merge to main and verify the push job
 
 After the PR is green, merge it. The push to `main` triggers a full run including the `push` job:
 
@@ -789,7 +789,7 @@ Expected: all 4 jobs green. The image appears at github.com → your profile →
 
 **Package visibility:** GHCR creates packages as **private** by default. To allow anonymous pulls, go to the package page → Package settings → Change visibility to public.
 
-#### 5e. Verify SARIF in Security tab
+#### 7e. Verify SARIF in Security tab
 
 After the first green run, confirm SARIF uploads landed under repo → **Security → Code scanning**. The sidebar shows two tools: **Hadolint** and **Trivy** (GitHub groups by tool name, not by the `category` values in `ci.yml` — so the two Trivy uploads, config + image, merge under a single "Trivy" entry). Both should show a green checkmark. A clean scan means no alerts listed.
 

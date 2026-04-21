@@ -607,14 +607,19 @@ pre-commit run gitleaks
 
 **Critical:** The workflow file must live at `.github/workflows/ci.yml` in the root of the repo. GitHub Actions only discovers workflows in this exact path — files placed elsewhere are invisible to the runner.
 
+**Files created:**
+- `.github/workflows/ci.yml`
+- `.trivyignore` — time-boxed CVE exception allow-list (empty by default, with format documentation)
+
 **Workflow-level configuration:**
-- **Triggers:** push to `main`, pull requests against `main`.
+- **Triggers:** push to `main`, pull requests against `main`. `paths-ignore` skips docs-only changes (`*.md`, `docs/**`, `LICENSE`, `CODEOWNERS`, PR template).
 - **Environment variables** (change per project):
   - `NODE_VERSION` — Node.js version to install (e.g., `22`)
-  - `PNPM_VERSION` — pnpm version (e.g., `10`). Used by `pnpm/action-setup`.
   - `APP_NAME` — Application name
   - `DOCKER_IMAGE_NAME` — Docker image name
 - **Permissions:** least-privilege default `contents: read` at workflow level; jobs override per-need (e.g., `security-events: write` for SARIF upload, `packages: write` for ghcr.io push).
+
+**No `PNPM_VERSION` env var.** `pnpm/action-setup@v4` reads the pnpm version directly from `package.json`'s `"packageManager": "pnpm@10.33.0"` field. Specifying both a `version` input and `packageManager` in `package.json` causes the action to error with "Multiple versions of pnpm specified". Single source of truth is `package.json`.
 
 **Pipeline structure — 4 jobs:**
 
@@ -622,7 +627,7 @@ pre-commit run gitleaks
 - **Runs:** Always (push to main, PRs)
 - **Steps:**
   1. Checkout code (`actions/checkout@v4`)
-  2. Install pnpm (`pnpm/action-setup@v4`) — uses `PNPM_VERSION` env var
+  2. Install pnpm (`pnpm/action-setup@v4`) — no `version` input; reads from `package.json`'s `packageManager` field
   3. Set up Node.js (`actions/setup-node@v4`) — uses `NODE_VERSION` env var, `cache: 'pnpm'` (auto-caches pnpm store for faster installs)
   4. Install dependencies — `pnpm install --frozen-lockfile` (id: `install`). `--frozen-lockfile` ensures CI uses the exact lockfile — fails if lockfile is out of sync with `package.json`, preventing non-deterministic installs.
   5. Format check — `pnpm biome format .` (id: `format-check`). Checks formatting without writing. Exit code 1 if any file is not formatted.
@@ -638,12 +643,13 @@ pre-commit run gitleaks
 - **Permissions:** `contents: read`, `security-events: write`
 - **Steps:**
   1. Checkout code
-  2. Hadolint — `hadolint/hadolint-action@v3.1.0`, SARIF output, `no-fail: false`, `failure-threshold: error` (only error-level findings fail the build; style/info/warning surface in SARIF but do not block)
-  3. Upload Hadolint SARIF to GitHub Security (`category: hadolint`) — guarded: `!cancelled() && !env.ACT && hashFiles('hadolint-results.sarif') != ''` (publishes on both success and failure so error-level findings reach the Security tab; `hashFiles()` avoids phantom upload failures when no SARIF was produced)
-  4. Trivy config scan — `aquasecurity/trivy-action@master`, `scan-type: config`, `severity: CRITICAL,HIGH`, `exit-code: '1'` (any CRITICAL/HIGH misconfig fails the step)
-  5. Upload Trivy config SARIF to GitHub Security (`category: trivy-config`) — same guard as Hadolint upload
+  2. Install Hadolint — **direct CLI download** (`curl` from GitHub releases, pinned to `v2.12.0`). Docker-based actions (`hadolint/hadolint-action`) fail under `act` due to a local image pull bug where `act` builds the action's Docker image locally but then tries to `docker pull` it from a registry. Direct CLI invocation is consistent with how Trivy image scan is handled in Job 3.
+  3. Hadolint (Dockerfile lint) — runs the CLI twice: once with `--format sarif` to produce SARIF output, once with `--failure-threshold error` for human-readable CI logs. Only error-level findings fail the build; style/info/warning surface in SARIF but do not block.
+  4. Upload Hadolint SARIF to GitHub Security (`category: hadolint`) — guarded: `!cancelled() && !env.ACT && hashFiles('hadolint-results.sarif') != ''` (publishes on both success and failure so error-level findings reach the Security tab; `hashFiles()` avoids phantom upload failures when no SARIF was produced)
+  5. Trivy config scan — `aquasecurity/trivy-action@master`, `scan-type: config`, `severity: CRITICAL,HIGH`, `exit-code: '1'` (any CRITICAL/HIGH misconfig fails the step)
+  6. Upload Trivy config SARIF to GitHub Security (`category: trivy-config`) — same guard as Hadolint upload
 
-**Identical to the Python template's Job 2.** Hadolint and Trivy config scan are Dockerfile/YAML checks — language-agnostic, no adaptation needed.
+**Deviation from the Python template's Job 2:** The Python template uses `hadolint/hadolint-action@v3.1.0` (a Docker-based action). This template uses a direct CLI invocation because Docker-based actions fail under `act`. The Trivy config scan step is identical.
 
 #### Job 3: `build` (Docker Build & Image Security)
 - **Runs:** Always (including under `act`); **Needs:** `[quality, dockerfile-security]`
@@ -655,7 +661,7 @@ pre-commit run gitleaks
      - `push: false`, `load: true` (loads into local daemon for smoke test / scan)
      - `tags: ${{ env.DOCKER_IMAGE_NAME }}:${{ github.sha }}`
      - GHA cache only on GitHub, disabled under act via `${{ !env.ACT && 'type=gha' || '' }}` ternary
-  4. Trivy image scan — **direct CLI invocation**, not `aquasecurity/trivy-action`. First install Trivy with `aquasecurity/setup-trivy@v0.2.6` (pinned). Then a plain `run:` step executes `trivy image --format sarif --output trivy-image-results.sarif --severity CRITICAL,HIGH --ignore-unfixed --ignorefile .trivyignore --exit-code 1 "$IMAGE_REF"`. **Why not `aquasecurity/trivy-action`?** Same reason as Python template: when `format: sarif` is combined with `exit-code: '1'`, the action runs Trivy twice — once for SARIF, once for the gate — and the `trivyignores` input is only wired to the SARIF run. Calling the CLI ourselves is one invocation, deterministic, and reproducible locally.
+  4. Trivy image scan — **direct CLI invocation**, not `aquasecurity/trivy-action`. First install Trivy with `aquasecurity/setup-trivy@v0.2.6` (pinned to `v0.69.3`). Then a plain `run:` step executes `trivy image --format sarif --output trivy-image-results.sarif --severity CRITICAL,HIGH --ignore-unfixed --ignorefile .trivyignore --exit-code 1 "$IMAGE_REF"`. **Why not `aquasecurity/trivy-action`?** Same reason as Python template: when `format: sarif` is combined with `exit-code: '1'`, the action runs Trivy twice — once for SARIF, once for the gate — and the `trivyignores` input is only wired to the SARIF run. Calling the CLI ourselves is one invocation, deterministic, and reproducible locally.
   5. Upload Trivy image SARIF (`category: trivy-image`) — same guard pattern as Job 2
   6. Container smoke test — runs the built image, waits up to 30s for readiness, then:
      - `curl http://localhost:8080/health` and verify `"status":"healthy"` (tolerating whitespace)
@@ -714,6 +720,17 @@ act push --container-architecture linux/amd64 --secret-file .secrets
 | SARIF uploads (Security tab) | Yes | Skipped |
 | Coverage artifact upload | Yes | Skipped |
 | Registry push | Yes (main only) | Skipped |
+
+#### Verification (completed)
+```bash
+# All three local jobs verified green with act:
+act -j quality --secret-file .secrets --container-architecture linux/amd64
+act -j dockerfile-security --secret-file .secrets --container-architecture linux/amd64 --pull=false
+act -j build --secret-file .secrets --container-architecture linux/amd64 --pull=false
+
+# Note: --pull=false is needed for jobs 2 and 3 to prevent act from
+# attempting to re-pull locally cached images.
+```
 
 ---
 

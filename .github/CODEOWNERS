@@ -1,0 +1,15 @@
+# CODEOWNERS — auto-assign reviewers based on paths touched.
+# Customize these rules for your team structure.
+# Requires "Require review from Code Owners" enabled in branch protection.
+#
+# Example path-based rules:
+#
+#   .github/                    @org/devops
+#   Dockerfile                  @org/devops
+#   nginx.conf                  @org/devops
+#   src/                        @org/frontend
+#   src/components/             @org/frontend
+#   src/pages/                  @org/frontend
+
+# Default: repo owner reviews everything
+*                               @maurorusso22

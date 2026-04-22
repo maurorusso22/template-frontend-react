@@ -81,6 +81,8 @@ template-frontend-react/
 │       ├── Home.test.tsx              # Home page tests
 │       ├── Items.test.tsx             # CRUD interaction tests
 │       └── NotFound.test.tsx          # Not-found rendering test
+├── docs/
+│   └── images/                        # Documentation screenshots and diagrams
 ├── docs-internal/                     # Git submodule → private docs repo
 ├── README.md                          # Template documentation
 └── PLAN.md                            # This file (removed before final template)

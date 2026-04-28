@@ -43,8 +43,8 @@ importers:
         specifier: ^4.1.4
         version: 4.1.4(vitest@4.1.4)
       jsdom:
-        specifier: ^29.0.2
-        version: 29.0.2
+        specifier: ^29.1.0
+        version: 29.1.0
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
@@ -53,7 +53,7 @@ importers:
         version: 8.0.9
       vitest:
         specifier: ^4.1.4
-        version: 4.1.4(@vitest/coverage-v8@4.1.4)(jsdom@29.0.2)(vite@8.0.9)
+        version: 4.1.4(@vitest/coverage-v8@4.1.4)(jsdom@29.1.0)(vite@8.0.9)
 
 packages:
 
@@ -576,8 +576,8 @@ packages:
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
 
-  jsdom@29.0.2:
-    resolution: {integrity: sha512-9VnGEBosc/ZpwyOsJBCQ/3I5p7Q5ngOY14a9bf5btenAORmZfDse1ZEheMiWcJ3h81+Fv7HmJFdS0szo/waF2w==}
+  jsdom@29.1.0:
+    resolution: {integrity: sha512-YNUc7fB9QuvSSQWfrH0xF+TyABkxUwx8sswgIDaCrw4Hol8BghdZDkITtZheRJeMtzWlnTfsM3bBBusRvpO1wg==}
     engines: {node: ^20.19.0 || ^22.13.0 || >=24.0.0}
     peerDependencies:
       canvas: ^3.0.0
@@ -1221,7 +1221,7 @@ snapshots:
       obug: 2.1.1
       std-env: 4.1.0
       tinyrainbow: 3.1.0
-      vitest: 4.1.4(@vitest/coverage-v8@4.1.4)(jsdom@29.0.2)(vite@8.0.9)
+      vitest: 4.1.4(@vitest/coverage-v8@4.1.4)(jsdom@29.1.0)(vite@8.0.9)
 
   '@vitest/expect@4.1.4':
     dependencies:
@@ -1366,7 +1366,7 @@ snapshots:
 
   js-tokens@4.0.0: {}
 
-  jsdom@29.0.2:
+  jsdom@29.1.0:
     dependencies:
       '@asamuzakjp/css-color': 5.1.11
       '@asamuzakjp/dom-selector': 7.1.1
@@ -1606,7 +1606,7 @@ snapshots:
     optionalDependencies:
       fsevents: 2.3.3
 
-  vitest@4.1.4(@vitest/coverage-v8@4.1.4)(jsdom@29.0.2)(vite@8.0.9):
+  vitest@4.1.4(@vitest/coverage-v8@4.1.4)(jsdom@29.1.0)(vite@8.0.9):
     dependencies:
       '@vitest/expect': 4.1.4
       '@vitest/mocker': 4.1.4(vite@8.0.9)
@@ -1630,7 +1630,7 @@ snapshots:
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@vitest/coverage-v8': 4.1.4(vitest@4.1.4)
-      jsdom: 29.0.2
+      jsdom: 29.1.0
     transitivePeerDependencies:
       - msw
 

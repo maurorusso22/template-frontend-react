@@ -29,7 +29,7 @@ Standardized template for React frontend projects. Clone it, rename it, and star
 | Scoped styling | CSS Modules | Zero-runtime scoped class names, built into Vite |
 | Production serving | nginx on Alpine | Lightweight static file server with SPA fallback and health endpoint |
 | Containerization | Multi-stage Dockerfile | Build with Node, serve with nginx. Non-root, digest-pinned images |
-| CI/CD pipeline | GitHub Actions (4 jobs) | Format, lint, typecheck, test, Dockerfile lint, Docker build, Trivy scan, smoke test, registry push |
+| CI/CD pipeline | GitHub Actions (4 jobs + 1 reusable workflow) | Format, lint, typecheck, test, Dockerfile lint, Docker build, Trivy scan, smoke test, registry push, push notification |
 | Security scanning | Hadolint + Trivy | Dockerfile linting, config misconfig detection, image CVE scanning with SARIF upload |
 | Dependency updates | Dependabot | Weekly automated PRs for npm, Docker, and GitHub Actions |
 | Pre-commit hooks | pre-commit | Biome check, typecheck, gitleaks secret scanning, conventional commits |
@@ -236,13 +236,23 @@ Both produce SARIF reports uploaded to GitHub's Security → Code scanning tab.
 | Smoke test | Starts the container and verifies: `/health` returns `{"status":"healthy"}`, `/` serves `index.html`, `/items` returns `index.html` (SPA fallback) |
 | Save artifact | Exports the scanned image as a tar (main branch only) |
 
-### Job 4: `push` — Push to Registry
+### Job 4: `push` — Push to Registry (reusable workflow)
 
 **Needs:** `build` — only runs on push to `main`.
 
-![Push to Registry job steps](docs/images/job_push.png)
+![Push to Registry job in the GHA run summary](docs/images/job_push.png)
 
-Loads the exact image that was scanned and smoke-tested (no rebuild), tags it, and pushes to the configured registry. See [Registry Configuration](#registry-configuration) for setup.
+Implemented as a caller of `.github/workflows/reusable-push.yml`. The reusable workflow loads the exact image that was scanned and smoke-tested (no rebuild), tags it, and pushes to the configured registry. It exposes an `image_ref` output — the fully-qualified pushed reference (e.g. `ghcr.io/org/foo:<sha>`) — that downstream jobs can consume.
+
+Why a reusable workflow: keeps push logic registry-agnostic and reusable across pipelines (a release or hotfix workflow can call the same file without duplicating the credential, tag, and push steps). See [Registry Configuration](#registry-configuration) for credential setup.
+
+### Job 5: `notify-pushed-image` — Print pushed image reference
+
+**Needs:** `push` — only runs on push to `main`.
+
+![Reusable workflow expanded into its underlying steps, with the pushed image reference echoed by notify-pushed-image](docs/images/reusable_push.png)
+
+Consumes `needs.push.outputs.image_ref` from the reusable workflow and echoes it. Today it only prints; it is the natural extension hook for future notifications (Slack/Teams, deploy triggers, Helm rollouts) — and the piece that closes the educational loop, showing how a reusable workflow output feeds back into the caller.
 
 ### What runs where
 
@@ -255,55 +265,107 @@ Loads the exact image that was scanned and smoke-tested (no rebuild), tags it, a
 | Coverage artifact upload | Yes | Skipped |
 | Registry push | Yes (main only) | Skipped |
 
+### Troubleshooting Trivy image scan failures
+
+When the **Job 3 → Trivy image scan** step fails, the CI logs only show the scan summary — not the offending CVEs. That is because the workflow runs Trivy with `--format sarif` (machine-readable, uploaded to the Security tab). To see the actual vulnerabilities, reproduce the scan locally with `--format table`:
+
+```bash
+# 1. Build the image the same way CI does
+docker build -t template-frontend-react:local .
+
+# 2. Scan with the same flags as CI, but in human-readable form
+trivy image \
+  --format table \
+  --severity CRITICAL,HIGH \
+  --ignore-unfixed \
+  --ignorefile .trivyignore \
+  template-frontend-react:local
+```
+
+Match the CI flags exactly:
+
+- `--ignore-unfixed` — without it you'll see CVEs the CI does **not** fail on.
+- `--ignorefile .trivyignore` — honors the existing allow-list.
+- Drop `--exit-code 1` so the table prints even when findings exist.
+- For perfect parity, install the Trivy version pinned in `ci.yml` (currently `v0.69.3`).
+
+#### Reacting to the output
+
+| Status column | Meaning | What to do |
+| ------------- | ------- | ---------- |
+| `fixed` (fix is in your base image) | The CVE is fixed in the version your base image already ships — your build is just stale. | Rebuild without cache (`docker build --no-cache ...`) or bump the base image digest in `Dockerfile`. |
+| `fixed` (fix not yet packaged downstream) | Upstream has a fix, but your distro (e.g. alpine) hasn't repackaged it yet. | Add a **time-boxed** entry to `.trivyignore`. |
+| `affected` / `will_not_fix` / no fix version | No upstream fix exists. | Already filtered out by `--ignore-unfixed` — should not block CI. If it does, check the flag is present. |
+
+#### Updating `.trivyignore`
+
+The file format and rules are documented at the top of `.trivyignore`. Each entry **must** include an expiry date so it can be revisited:
+
+```
+CVE-YYYY-NNNNN   # short reason (exp:YYYY-MM-DD)
+```
+
+Example:
+
+```
+CVE-2026-27135   # nghttp2-libs: fix in 1.68.1, not yet in alpine 3.23 (exp:2026-06-05)
+```
+
+After editing, re-run the local scan above to confirm the CVE is gone, then commit. When the expiry passes, **remove** the entry rather than extending it — by then the base-image bump should carry the fix, or a Dependabot PR is overdue.
+
 ## Registry Configuration
 
-The `push` job is registry-agnostic. It uses three secrets/variables configured in Settings → Secrets and variables → Actions:
+The `push` job is registry-agnostic. It uses three settings configured in Settings → Secrets and variables → Actions:
 
 | Name | Type | Required | Purpose |
 | ---- | ---- | -------- | ------- |
-| `REGISTRY_USERNAME` | Secret | Yes | Registry login username |
+| `REGISTRY_USERNAME` | **Variable** | Yes | Registry login username |
 | `REGISTRY_TOKEN` | Secret | Yes | Registry login password or token |
 | `REGISTRY_URL` | Variable | No | Registry host. Empty defaults to Docker Hub |
+
+> **Why `REGISTRY_USERNAME` is a Variable, not a Secret.** GitHub Actions masks any value registered as a secret everywhere it appears in logs — including when it shows up as a substring inside another string. Because the pushed image reference embeds the username (e.g. `ghcr.io/<username>/<app>:<sha>`), storing the username as a secret would mask the entire image ref in downstream steps like `notify-pushed-image`, leaving an empty `***` in the logs. Storing it as a Variable keeps it readable while the actual credential (`REGISTRY_TOKEN`) stays a Secret. The username is not sensitive on its own — only the token is.
 
 The resulting image tag is `<REGISTRY_URL>/<DOCKER_IMAGE_NAME>:<commit-sha>` (or `<DOCKER_IMAGE_NAME>:<commit-sha>` when `REGISTRY_URL` is empty).
 
 ### Per-registry setup
 
+In the steps below, "**Variable**" and "**Secret**" refer to the two tabs under Settings → Secrets and variables → Actions. `REGISTRY_USERNAME` and `REGISTRY_URL` go under Variables; `REGISTRY_TOKEN` goes under Secrets.
+
 **GitHub Container Registry (ghcr.io):**
 
 1. Create a Classic PAT at github.com/settings/tokens with scopes: `write:packages`, `read:packages` (fine-grained tokens do not support GHCR yet)
-2. Set `REGISTRY_USERNAME` = your GitHub username
-3. Set `REGISTRY_TOKEN` = the Classic PAT
-4. Set `REGISTRY_URL` variable = `ghcr.io/<your-username>`
+2. Set `REGISTRY_USERNAME` (Variable) = your GitHub username
+3. Set `REGISTRY_TOKEN` (Secret) = the Classic PAT
+4. Set `REGISTRY_URL` (Variable) = `ghcr.io/<your-username>`
 
 GHCR creates packages as **private** by default. To allow anonymous pulls: package page → Package settings → Change visibility to public.
 
 **Docker Hub:**
 
 1. Create an access token at hub.docker.com/settings/security
-2. Set `REGISTRY_USERNAME` = your Docker Hub username
-3. Set `REGISTRY_TOKEN` = the access token
+2. Set `REGISTRY_USERNAME` (Variable) = your Docker Hub username
+3. Set `REGISTRY_TOKEN` (Secret) = the access token
 4. Leave `REGISTRY_URL` empty (defaults to Docker Hub)
 
 **AWS ECR:**
 
-1. Set `REGISTRY_USERNAME` = `AWS`
-2. Set `REGISTRY_TOKEN` = output of `aws ecr get-login-password`
-3. Set `REGISTRY_URL` = `<account-id>.dkr.ecr.<region>.amazonaws.com`
+1. Set `REGISTRY_USERNAME` (Variable) = `AWS`
+2. Set `REGISTRY_TOKEN` (Secret) = output of `aws ecr get-login-password`
+3. Set `REGISTRY_URL` (Variable) = `<account-id>.dkr.ecr.<region>.amazonaws.com`
 
 For production, consider replacing static credentials with OIDC federation (`aws-actions/configure-aws-credentials`).
 
 **Azure Container Registry (ACR):**
 
 1. Create a service principal or admin credentials
-2. Set `REGISTRY_USERNAME` = service principal app ID or admin username
-3. Set `REGISTRY_TOKEN` = service principal password or admin password
-4. Set `REGISTRY_URL` = `<registry-name>.azurecr.io`
+2. Set `REGISTRY_USERNAME` (Variable) = service principal app ID or admin username
+3. Set `REGISTRY_TOKEN` (Secret) = service principal password or admin password
+4. Set `REGISTRY_URL` (Variable) = `<registry-name>.azurecr.io`
 
 **Self-hosted (Harbor, Nexus, Artifactory):**
 
-1. Set `REGISTRY_USERNAME` and `REGISTRY_TOKEN` to your registry credentials
-2. Set `REGISTRY_URL` = your registry host (e.g., `registry.company.com`)
+1. Set `REGISTRY_USERNAME` (Variable) to your registry username and `REGISTRY_TOKEN` (Secret) to your registry password/token
+2. Set `REGISTRY_URL` (Variable) = your registry host (e.g., `registry.company.com`)
 
 ## Internal Documentation (submodule)
 

@@ -10,3 +10,5 @@
 #
 # Example:
 #   CVE-2024-99999   # nginx: no fix in stable-alpine yet (exp:2025-06-01)
+
+CVE-2026-27135   # nghttp2-libs: fix in 1.68.1, not yet in alpine 3.23 (exp:2026-06-05)
